@@ -1,4 +1,6 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -6,6 +8,39 @@ from app.config import settings
 from app.core.logging import RequestLoggingMiddleware
 from app.core.errors import register_error_handlers
 from app.api.v1.incidents import router as incidents_router
+from app.rag.store import initialize_store
+from app.rag.parser import parse_all_playbooks
+
+logger = logging.getLogger("cybersage.main")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifecycle management.
+    Initializes ChromaDB vector store and auto-ingests playbooks if collection is empty.
+    """
+    logger.info("Initializing CyberSage AI application lifecycle...")
+    try:
+        store = initialize_store(
+            persist_directory=settings.resolved_chroma_dir,
+            embedding_model=settings.EMBEDDING_MODEL_NAME,
+        )
+        if store.is_empty():
+            logger.info(f"Vector store is empty. Auto-ingesting playbooks from '{settings.resolved_playbooks_dir}'...")
+            chunks = parse_all_playbooks(settings.resolved_playbooks_dir)
+            if chunks:
+                store.ingest(chunks)
+                logger.info(f"Successfully auto-ingested {len(chunks)} playbook chunks into ChromaDB.")
+            else:
+                logger.warning("No playbook files found to ingest on startup.")
+    except Exception as e:
+        logger.warning(f"Vector store initialization deferred or encountered issue: {e}")
+
+    yield
+
+    logger.info("CyberSage AI application shutting down...")
+
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -14,6 +49,7 @@ app = FastAPI(
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
+    lifespan=lifespan,
 )
 
 # 1. Logging and Correlation Middleware
