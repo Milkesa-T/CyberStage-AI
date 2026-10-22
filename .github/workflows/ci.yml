@@ -1,0 +1,66 @@
+name: CyberSage AI CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-test:
+    name: Backend Pytest & Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Ingest Knowledge Base Playbooks
+        run: |
+          python backend/scripts/ingest_playbooks.py
+        env:
+          PYTHONPATH: backend
+          CHROMA_PERSIST_DIRECTORY: ./backend/data/chroma
+          PLAYBOOKS_DIRECTORY: ./knowledge_base/playbooks
+          EMBEDDING_MODEL_NAME: all-MiniLM-L6-v2
+
+      - name: Run Pytest Test Suite
+        run: |
+          pytest backend/tests -v
+        env:
+          PYTHONPATH: backend
+          CHROMA_PERSIST_DIRECTORY: ./backend/data/chroma
+          PLAYBOOKS_DIRECTORY: ./knowledge_base/playbooks
+          EMBEDDING_MODEL_NAME: all-MiniLM-L6-v2
+
+  frontend-build:
+    name: Frontend Lint & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package.json
+
+      - name: Install Frontend Dependencies
+        working-directory: frontend
+        run: npm install
+
+      - name: Build Vite Application
+        working-directory: frontend
+        run: npm run build
