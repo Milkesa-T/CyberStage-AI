@@ -17,6 +17,20 @@ Oct 22 10:14:10 bastion-01 sshd[2849]: Failed password for invalid user test fro
 Oct 22 10:14:12 bastion-01 sshd[2851]: Maximum authentication attempts exceeded for invalid user test from 198.51.100.44 port 48218 ssh2`,
   },
   {
+    name: 'Ransomware Attack',
+    icon: '⚡',
+    title: 'Active Ransomware Outbreak & Shadow Copy Deletion',
+    description: 'Finance file share server shows volume shadow deletion and mass file extension renaming to .locked.',
+    affected_asset: 'fs-finance-01.corp.internal',
+    source_ip: '198.51.100.99',
+    raw_logs: `EventID 4688: Process Creation: cmd.exe /c vssadmin delete shadows /all /quiet
+Process spawned: C:\\Windows\\Temp\\crypt_payload.exe -dir C:\\FinanceShare
+Renaming: C:\\FinanceShare\\Q3_Earnings.xlsx -> Q3_Earnings.xlsx.locked
+Renaming: C:\\FinanceShare\\Payroll.docx -> Payroll.docx.locked
+Created file: C:\\FinanceShare\\HOW_TO_DECRYPT_FILES.txt
+Network connection: Outbound payload transfer to 198.51.100.99:8080`,
+  },
+  {
     name: 'Spear-Phishing',
     icon: '🎣',
     title: 'Executive Wire Fraud Phishing Campaign',
@@ -30,6 +44,19 @@ Header-Message-ID: <4910.20261022@finance-approval-portal.xyz>
 Body text snippet: "Please immediately authorize the attached expedited invoice at: https://secure-wire-verify.xyz/login?token=8943"`,
   },
   {
+    name: 'SQLi & Cloud SSRF',
+    icon: '🌐',
+    title: 'Web Application SQL Injection & IMDS SSRF Attempt',
+    description: 'Public API gateway detected UNION SELECT injection and AWS metadata service credential harvesting.',
+    affected_asset: 'api-gateway-prod',
+    source_ip: '198.51.100.77',
+    raw_logs: `GET /api/v1/users?id=1' UNION SELECT username,password FROM app_users-- HTTP/1.1
+Host: api.cybercorp.io
+User-Agent: sqlmap/1.6.4#stable
+Follow-up request: GET /proxy?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/ HTTP/1.1
+Response: 200 OK - length 1420 bytes referencing CVE-2021-44228`,
+  },
+  {
     name: 'Malware Persistence',
     icon: '🦠',
     title: 'Suspicious PowerShell & Scheduled Task Persistence',
@@ -38,6 +65,7 @@ Body text snippet: "Please immediately authorize the attached expedited invoice 
     source_ip: '185.220.101.5',
     raw_logs: `EventID 4688: Process Creation: powershell.exe -NoP -NonI -W Hidden -Enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQ...
 EventID 4697: Service/Task Installation: 'WindowsSecurityHealthUpdater' pointing to C:\\Users\\Public\\svchost_updater.exe
+SHA256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 Network Connection: C:\\Users\\Public\\svchost_updater.exe established outbound connection to 185.220.101.5:4444 (State: ESTABLISHED)`,
   },
   {
@@ -68,6 +96,7 @@ export default function App() {
   const [error, setError] = useState(null);
   const [backendHealth, setBackendHealth] = useState(null);
   const [checkedSteps, setCheckedSteps] = useState({});
+  const [expandedRollback, setExpandedRollback] = useState({});
   const [toastMessage, setToastMessage] = useState(null);
 
   // Poll backend health check on mount
@@ -95,6 +124,12 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 3500);
   };
 
+  const copyToClipboard = (text, label) => {
+    if (!text) return;
+    navigator.clipboard.writeText(text);
+    showToast(`Copied ${label} to clipboard`);
+  };
+
   const handleTemplateSelect = (template) => {
     setFormData({
       title: template.title,
@@ -117,62 +152,7 @@ export default function App() {
     setAssessment(null);
     setError(null);
     setCheckedSteps({});
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!formData.title || formData.title.length < 3) {
-      setError('Title must be at least 3 characters.');
-      return;
-    }
-    if (!formData.description || formData.description.length < 10) {
-      setError('Description must be at least 10 characters.');
-      return;
-    }
-    if (!formData.raw_logs || formData.raw_logs.length < 10) {
-      setError('Raw logs must be at least 10 characters.');
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-    setCheckedSteps({});
-
-    const startTime = performance.now();
-
-    try {
-      const response = await fetch(`${API_BASE}/api/v1/incidents/triage`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          title: formData.title,
-          description: formData.description,
-          raw_logs: formData.raw_logs,
-          source_ip: formData.source_ip || null,
-          affected_asset: formData.affected_asset || null,
-        }),
-      });
-
-      const data = await response.json();
-      const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
-
-      if (!response.ok) {
-        throw new Error(data.detail || data.message || 'Triage submission failed');
-      }
-
-      setAssessment({
-        ...data,
-        elapsedSeconds: elapsed,
-        requestId: response.headers.get('X-Request-ID') || 'N/A',
-      });
-      showToast(`Triage assessment generated in ${elapsed}s`);
-    } catch (err) {
-      setError(err.message || 'Network error connecting to CyberSage API');
-    } finally {
-      setLoading(false);
-    }
+    setExpandedRollback({});
   };
 
   const toggleStep = (index) => {
@@ -182,33 +162,131 @@ export default function App() {
     }));
   };
 
+  const toggleRollback = (index) => {
+    setExpandedRollback((prev) => ({
+      ...prev,
+      [index]: !prev[index],
+    }));
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    setCheckedSteps({});
+    setExpandedRollback({});
+
+    const startTime = performance.now();
+
+    try {
+      const payload = {
+        title: formData.title.trim(),
+        description: formData.description.trim(),
+        raw_logs: formData.raw_logs.trim(),
+        source_ip: formData.source_ip.trim() || null,
+        affected_asset: formData.affected_asset.trim() || null,
+      };
+
+      const res = await fetch(`${API_BASE}/api/v1/incidents/triage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Server responded with status ${res.status}`);
+      }
+
+      const data = await res.json();
+      const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+      setAssessment({ ...data, elapsedSeconds: elapsed });
+      showToast('Incident triage assessment complete');
+    } catch (err) {
+      setError(err.message || 'Failed to submit incident for triage.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const copyMarkdownReport = () => {
     if (!assessment) return;
-    const text = `# CyberSage AI — Defensive Incident Triage Report
-- **Incident ID:** \`${assessment.incident_id}\`
-- **Timestamp:** ${assessment.timestamp}
-- **Severity:** **${assessment.suggested_severity}**
-- **Category:** \`${assessment.incident_category}\`
-- **Affected Asset:** ${formData.affected_asset || 'N/A'}
-- **Source IP:** ${formData.source_ip || 'N/A'}
 
-## Executive Summary
-${assessment.summary}
+    let md = `# [CyberSage AI] Incident Triage Report\n\n`;
+    md += `**Incident ID:** \`${assessment.incident_id}\`  \n`;
+    md += `**Timestamp:** ${assessment.timestamp}  \n`;
+    md += `**Severity:** **${assessment.suggested_severity}**  \n`;
+    md += `**Category:** ${assessment.incident_category}  \n`;
+    if (assessment.confidence_score !== undefined) {
+      md += `**Confidence Score:** ${(assessment.confidence_score * 100).toFixed(1)}% | **False Positive Risk:** ${assessment.false_positive_risk}\n\n`;
+    }
 
-## Actionable Containment Steps
-${assessment.recommended_steps.map((s, i) => `${i + 1}. [${checkedSteps[i] ? 'x' : ' '}] ${s}`).join('\n')}
+    if (assessment.sla_deadline) {
+      md += `### Response SLAs (Service Level Agreements)\n`;
+      md += `- **MTTA Target:** ${assessment.sla_deadline.mtta_minutes} minutes (Deadline: ${assessment.sla_deadline.acknowledge_deadline_utc})\n`;
+      md += `- **MTTR Target:** ${assessment.sla_deadline.mttr_minutes} minutes (Deadline: ${assessment.sla_deadline.remediate_deadline_utc})\n`;
+      md += `- **Escalation Pathway:** ${assessment.sla_deadline.escalation_tier}\n`;
+      if (assessment.sla_deadline.regulatory_breach_window) {
+        md += `- **Regulatory Notice:** ${assessment.sla_deadline.regulatory_breach_window}\n`;
+      }
+      md += `\n`;
+    }
 
-## Observable Evidence
-${assessment.supporting_evidence.map((e) => `- ${e}`).join('\n')}
+    md += `## Executive Summary\n${assessment.summary}\n\n`;
 
-## Cited Defensive Playbooks (RAG)
-${assessment.source_references.map((r) => `- **${r.playbook_id}**: ${r.playbook_title} (${r.section}) [Similarity: ${(r.similarity_score * 100).toFixed(1)}%]`).join('\n')}
+    if (assessment.extracted_iocs && assessment.extracted_iocs.public_ips) {
+      md += `## Extracted Indicators of Compromise (IOCs)\n`;
+      if (assessment.extracted_iocs.public_ips.length > 0) {
+        md += `- **Public IPs:** ${assessment.extracted_iocs.public_ips.join(', ')}\n`;
+      }
+      if (assessment.extracted_iocs.private_ips.length > 0) {
+        md += `- **Private IPs:** ${assessment.extracted_iocs.private_ips.join(', ')}\n`;
+      }
+      if (assessment.extracted_iocs.defanged_urls.length > 0) {
+        md += `- **Defanged URLs:** ${assessment.extracted_iocs.defanged_urls.join(', ')}\n`;
+      }
+      if (assessment.extracted_iocs.file_hashes.length > 0) {
+        md += `- **File Hashes:** ${assessment.extracted_iocs.file_hashes.join(', ')}\n`;
+      }
+      if (assessment.extracted_iocs.cve_ids.length > 0) {
+        md += `- **CVEs:** ${assessment.extracted_iocs.cve_ids.join(', ')}\n`;
+      }
+      md += `\n`;
+    }
 
-## Uncertainty & Operational Limitations
-${assessment.uncertainty_limitations}
-`;
-    navigator.clipboard.writeText(text);
-    showToast('Markdown report copied to clipboard!');
+    if (assessment.mitre_mapping && assessment.mitre_mapping.tactics) {
+      md += `## MITRE ATT&CK Mapping\n`;
+      md += `- **Tactics:** ${assessment.mitre_mapping.tactics.join(', ')}\n`;
+      md += `- **Techniques:** ${assessment.mitre_mapping.techniques.join(', ')}\n\n`;
+    }
+
+    md += `## Actionable Containment Steps\n`;
+    assessment.recommended_steps.forEach((s, idx) => {
+      md += `${idx + 1}. ${s}\n`;
+    });
+    md += `\n`;
+
+    if (assessment.remediation_scripts && assessment.remediation_scripts.length > 0) {
+      md += `## Executable Remediation Scripts\n`;
+      assessment.remediation_scripts.forEach((scr) => {
+        md += `### ${scr.platform} — ${scr.action}\n\`\`\`bash\n${scr.commands.join('\n')}\n\`\`\`\n\n`;
+      });
+    }
+
+    if (assessment.compliance_mappings && assessment.compliance_mappings.length > 0) {
+      md += `## Regulatory Compliance Controls\n`;
+      assessment.compliance_mappings.forEach((c) => {
+        md += `- **${c.framework} [${c.control_id}]:** ${c.title} — ${c.relevance_note}\n`;
+      });
+      md += `\n`;
+    }
+
+    md += `## Observable Telemetry Evidence\n`;
+    assessment.supporting_evidence.forEach((ev) => {
+      md += `- \`${ev}\`\n`;
+    });
+
+    copyToClipboard(md, 'Markdown report');
   };
 
   const exportJSON = () => {
@@ -220,83 +298,104 @@ ${assessment.uncertainty_limitations}
     a.download = `cybersage-triage-${assessment.incident_id.slice(0, 8)}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    showToast('JSON assessment downloaded');
+    showToast('Exported incident assessment JSON');
+  };
+
+  const formatUtcTime = (utcStr) => {
+    if (!utcStr) return '';
+    try {
+      const d = new Date(utcStr);
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + ' UTC';
+    } catch {
+      return utcStr;
+    }
   };
 
   return (
     <div>
-      {/* Top Navigation */}
-      <header className="navbar">
+      {/* Navbar Header */}
+      <nav className="navbar">
         <div className="brand-wrapper">
-          <svg className="brand-logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
-          </svg>
-          <span className="brand-title">CyberSage AI</span>
-          <span className="brand-badge">SOC Assistant</span>
+          <div className="brand-logo-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#050b14" strokeWidth="2.5">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 2L3 7v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z" />
+            </svg>
+          </div>
+          <span className="brand-name">CyberSage AI</span>
+          <span className="brand-badge">SOC Enterprise</span>
         </div>
 
-        <div className="nav-status-items">
-          <div className="status-indicator" title={backendHealth ? 'Connected to backend' : 'Backend offline or unreachable'}>
-            <div className={`status-dot ${backendHealth ? '' : 'offline'}`} />
-            <span>{backendHealth ? `API Online (${backendHealth.environment})` : 'API Offline'}</span>
+        <div className="system-status-group">
+          <div className="status-pill">
+            <span className={`status-dot ${backendHealth ? 'online' : 'offline'}`} />
+            <span>API: {backendHealth ? 'ONLINE' : 'OFFLINE'}</span>
           </div>
-          <div className="status-indicator">
-            <span style={{ color: 'var(--cyber-cyan)', fontWeight: 600 }}>RAG + Gemini 2.5</span>
+
+          <div className="status-pill">
+            <span className={`status-dot ${backendHealth?.vector_store?.count > 0 ? 'online' : 'offline'}`} />
+            <span>RAG Playbooks: {backendHealth?.vector_store?.count ?? 0}</span>
+          </div>
+
+          <div className="status-pill">
+            <span className="status-dot online" />
+            <span>Detectors: 7 Active</span>
           </div>
         </div>
-      </header>
+      </nav>
 
-      {/* Main SOC Dashboard */}
+      {/* Main Grid */}
       <main className="dashboard-container">
-        {/* Left Column: Form Submission */}
-        <section className="panel" aria-labelledby="form-heading">
+        {/* Left Column: Submission Form */}
+        <section className="panel" aria-labelledby="intake-heading">
           <div className="panel-header">
-            <h1 id="form-heading" className="panel-title">
+            <h2 id="intake-heading" className="panel-title">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m5.25 6H12m-3 0h.008v.008H9V18zm0-3h.008v.008H9V15zm0-3h.008v.008H9V12zm0-3h.008v.008H9V9z" />
               </svg>
-              Submit Incident Telemetry
-            </h1>
+              Incident Telemetry Intake
+            </h2>
+
             <button
               id="clear-form-btn"
               type="button"
               className="btn-secondary"
               onClick={handleClear}
-              title="Reset all form fields"
+              title="Clear all fields"
             >
               Clear
             </button>
           </div>
 
           <div className="panel-body">
-            {/* Template Selector */}
-            <div className="template-bar">
-              <span className="template-label">Pre-load Incident Scenario:</span>
-              <div className="template-chips">
-                {TEMPLATES.map((tmpl) => (
-                  <button
-                    key={tmpl.name}
-                    id={`template-${tmpl.name.toLowerCase().replace(/\s+/g, '-')}`}
-                    type="button"
-                    className="chip-btn"
-                    onClick={() => handleTemplateSelect(tmpl)}
-                  >
-                    <span>{tmpl.icon}</span>
-                    <span>{tmpl.name}</span>
-                  </button>
-                ))}
-              </div>
+            {/* Scenario Preset Chips */}
+            <div style={{ marginBottom: '0.6rem' }}>
+              <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Enterprise Scenario Presets:
+              </span>
+            </div>
+            <div className="templates-carousel" role="toolbar" aria-label="Scenario Templates">
+              {TEMPLATES.map((tmpl, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  className="template-chip"
+                  onClick={() => handleTemplateSelect(tmpl)}
+                >
+                  <span>{tmpl.icon}</span>
+                  <span>{tmpl.name}</span>
+                </button>
+              ))}
             </div>
 
             {error && (
               <div style={{
-                background: 'rgba(239, 68, 68, 0.1)',
-                border: '1px solid var(--sev-critical-border)',
-                color: 'var(--sev-critical-text)',
-                padding: '0.75rem 1rem',
+                background: 'rgba(239, 68, 68, 0.15)',
+                border: '1px solid rgba(239, 68, 68, 0.4)',
                 borderRadius: '8px',
-                marginBottom: '1.25rem',
-                fontSize: '0.85rem'
+                padding: '0.75rem 1rem',
+                color: '#fca5a5',
+                fontSize: '0.85rem',
+                marginBottom: '1.25rem'
               }}>
                 ⚠️ {error}
               </div>
@@ -383,7 +482,7 @@ ${assessment.uncertainty_limitations}
                 {loading ? (
                   <>
                     <span className="radar-circle" style={{ width: 16, height: 16, borderWidth: 2 }} />
-                    Analyzing Telemetry & Retrieving Playbooks...
+                    Running Modular Detectors & Playbook RAG...
                   </>
                 ) : (
                   <>
@@ -441,7 +540,7 @@ ${assessment.uncertainty_limitations}
                     Correlating Telemetry with Knowledge Base
                   </h3>
                   <p style={{ fontSize: '0.85rem', color: '#94a3b8', marginTop: '0.25rem' }}>
-                    Querying ChromaDB vector embeddings & formulating bounded Gemini prompt...
+                    Executing IOC extractors, modular threat detectors & ChromaDB embeddings...
                   </p>
                 </div>
               </div>
@@ -455,15 +554,15 @@ ${assessment.uncertainty_limitations}
                 <h3 style={{ color: '#cbd5e1', fontSize: '1.05rem', fontWeight: 600, marginBottom: '0.5rem' }}>
                   Awaiting Incident Telemetry
                 </h3>
-                <p style={{ maxWidth: '360px', fontSize: '0.85rem', lineHeight: 1.6 }}>
-                  Select an incident scenario from the preset chips on the left, or paste custom raw logs to run an AI-powered defensive triage assessment.
+                <p style={{ maxWidth: '380px', fontSize: '0.85rem', lineHeight: 1.6 }}>
+                  Select an enterprise incident preset on the left or paste raw logs to execute multi-vector threat detection, SLA deadlines, and automated remediation generation.
                 </p>
               </div>
             )}
 
             {!loading && assessment && (
               <div id="triage-results-container">
-                {/* Header with Severity & Category */}
+                {/* Header with Severity, Category & Confidence */}
                 <div className="assessment-header">
                   <div className="badges-group">
                     <span id="severity-badge" className={`severity-badge ${assessment.suggested_severity}`}>
@@ -472,6 +571,16 @@ ${assessment.uncertainty_limitations}
                     <span id="category-badge" className="category-badge">
                       {assessment.incident_category}
                     </span>
+                    {assessment.confidence_score !== undefined && (
+                      <span className="meta-badge" title="Ensemble Detection Confidence">
+                        🎯 {(assessment.confidence_score * 100).toFixed(0)}% Conf.
+                      </span>
+                    )}
+                    {assessment.false_positive_risk && (
+                      <span className={`meta-badge risk-${assessment.false_positive_risk.toLowerCase()}`}>
+                        FP Risk: {assessment.false_positive_risk}
+                      </span>
+                    )}
                   </div>
 
                   <div style={{ fontSize: '0.75rem', color: '#64748b', fontFamily: 'var(--font-mono)' }}>
@@ -479,7 +588,212 @@ ${assessment.uncertainty_limitations}
                   </div>
                 </div>
 
-                {/* Executive Summary */}
+                {/* 1. SLA Deadlines & Escalation Pathway */}
+                {assessment.sla_deadline && (
+                  <div className="sla-card">
+                    <div className="sla-header">
+                      <div className="sla-title">
+                        <span>⏱️ Enterprise Response SLAs</span>
+                      </div>
+                      <span className="sla-escalation-badge">
+                        🚨 {assessment.sla_deadline.escalation_tier}
+                      </span>
+                    </div>
+
+                    <div className="sla-grid">
+                      <div className="sla-box">
+                        <div className="sla-box-label">Acknowledge SLA (MTTA)</div>
+                        <div className="sla-box-value">{assessment.sla_deadline.mtta_minutes} min</div>
+                        <div className="sla-box-time">Target: {formatUtcTime(assessment.sla_deadline.acknowledge_deadline_utc)}</div>
+                      </div>
+
+                      <div className="sla-box">
+                        <div className="sla-box-label">Remediation SLA (MTTR)</div>
+                        <div className="sla-box-value">{assessment.sla_deadline.mttr_minutes} min</div>
+                        <div className="sla-box-time">Target: {formatUtcTime(assessment.sla_deadline.remediate_deadline_utc)}</div>
+                      </div>
+                    </div>
+
+                    {assessment.sla_deadline.regulatory_breach_window && (
+                      <div className="regulatory-banner">
+                        <span>⚠️</span>
+                        <span>{assessment.sla_deadline.regulatory_breach_window}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 2. Forensic Indicators of Compromise (IOC Vault) */}
+                {assessment.extracted_iocs && (
+                  <div className="report-section">
+                    <h3 className="section-heading">
+                      <span>🔍 Forensic Indicators of Compromise (IOC Vault)</span>
+                    </h3>
+                    <div className="ioc-vault-grid">
+                      {assessment.extracted_iocs.public_ips?.length > 0 && (
+                        <div className="ioc-category-box">
+                          <div className="ioc-category-title">
+                            <span>Hostile External IPs (WAN)</span>
+                            <span style={{ color: '#ef4444' }}>● External</span>
+                          </div>
+                          <div className="ioc-tag-wrap">
+                            {assessment.extracted_iocs.public_ips.map((ip, i) => (
+                              <button
+                                key={i}
+                                type="button"
+                                className="ioc-tag public-ip"
+                                onClick={() => copyToClipboard(ip, `IP ${ip}`)}
+                                title="Click to copy IP"
+                              >
+                                {ip} 📋
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {assessment.extracted_iocs.private_ips?.length > 0 && (
+                        <div className="ioc-category-box">
+                          <div className="ioc-category-title">
+                            <span>Internal Network IPs (RFC 1918)</span>
+                            <span style={{ color: '#60a5fa' }}>● Lateral</span>
+                          </div>
+                          <div className="ioc-tag-wrap">
+                            {assessment.extracted_iocs.private_ips.map((ip, i) => (
+                              <button
+                                key={i}
+                                type="button"
+                                className="ioc-tag private-ip"
+                                onClick={() => copyToClipboard(ip, `IP ${ip}`)}
+                                title="Click to copy IP"
+                              >
+                                {ip} 📋
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {assessment.extracted_iocs.defanged_urls?.length > 0 && (
+                        <div className="ioc-category-box">
+                          <div className="ioc-category-title">
+                            <span>Defanged URLs (Safe View)</span>
+                          </div>
+                          <div className="ioc-tag-wrap">
+                            {assessment.extracted_iocs.defanged_urls.map((url, i) => (
+                              <button
+                                key={i}
+                                type="button"
+                                className="ioc-tag"
+                                onClick={() => copyToClipboard(url, 'URL')}
+                                title="Click to copy URL"
+                              >
+                                {url} 📋
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {assessment.extracted_iocs.file_hashes?.length > 0 && (
+                        <div className="ioc-category-box">
+                          <div className="ioc-category-title">
+                            <span>File Hashes (SHA256 / MD5)</span>
+                          </div>
+                          <div className="ioc-tag-wrap">
+                            {assessment.extracted_iocs.file_hashes.map((hash, i) => (
+                              <button
+                                key={i}
+                                type="button"
+                                className="ioc-tag hash"
+                                onClick={() => copyToClipboard(hash, 'Hash')}
+                                title="Click to copy Hash"
+                              >
+                                {hash.slice(0, 16)}... 📋
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {assessment.extracted_iocs.cve_ids?.length > 0 && (
+                        <div className="ioc-category-box">
+                          <div className="ioc-category-title">
+                            <span>Referenced CVEs</span>
+                          </div>
+                          <div className="ioc-tag-wrap">
+                            {assessment.extracted_iocs.cve_ids.map((cve, i) => (
+                              <button
+                                key={i}
+                                type="button"
+                                className="ioc-tag cve"
+                                onClick={() => copyToClipboard(cve, cve)}
+                                title="Click to copy CVE"
+                              >
+                                {cve} 📋
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {assessment.extracted_iocs.cloud_identities?.length > 0 && (
+                        <div className="ioc-category-box">
+                          <div className="ioc-category-title">
+                            <span>Cloud Identities / IAM Keys</span>
+                          </div>
+                          <div className="ioc-tag-wrap">
+                            {assessment.extracted_iocs.cloud_identities.map((id, i) => (
+                              <button
+                                key={i}
+                                type="button"
+                                className="ioc-tag cve"
+                                onClick={() => copyToClipboard(id, 'Cloud Identity')}
+                                title="Click to copy"
+                              >
+                                {id} 📋
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* 3. MITRE ATT&CK Attribution Matrix */}
+                {assessment.mitre_mapping && (assessment.mitre_mapping.tactics?.length > 0 || assessment.mitre_mapping.techniques?.length > 0) && (
+                  <div className="mitre-matrix-card">
+                    <div className="section-heading" style={{ color: '#d8b4fe', marginBottom: '0.75rem' }}>
+                      <span>🎯 MITRE ATT&CK Attribution Matrix</span>
+                    </div>
+                    <div className="mitre-tags-wrapper">
+                      {assessment.mitre_mapping.tactics?.length > 0 && (
+                        <div className="mitre-tactic-row">
+                          <span className="mitre-label">TACTICS:</span>
+                          {assessment.mitre_mapping.tactics.map((t, idx) => (
+                            <span key={idx} className="mitre-badge">
+                              {t}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {assessment.mitre_mapping.techniques?.length > 0 && (
+                        <div className="mitre-tactic-row">
+                          <span className="mitre-label">TECHNIQUES:</span>
+                          {assessment.mitre_mapping.techniques.map((tech, idx) => (
+                            <span key={idx} className="mitre-tech-badge">
+                              {tech}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* 4. Executive Summary */}
                 <div className="report-section">
                   <h3 className="section-heading">Executive Summary</h3>
                   <div id="incident-summary-text" className="summary-box">
@@ -487,7 +801,98 @@ ${assessment.uncertainty_limitations}
                   </div>
                 </div>
 
-                {/* Actionable Containment Steps */}
+                {/* 5. Executable Remediation Shell Scripts */}
+                {assessment.remediation_scripts && assessment.remediation_scripts.length > 0 && (
+                  <div className="report-section">
+                    <h3 className="section-heading">
+                      <span>⚡ Executable Remediation Scripts (Copy-Paste Ready)</span>
+                    </h3>
+                    {assessment.remediation_scripts.map((script, idx) => (
+                      <div key={idx} className="terminal-card">
+                        <div className="terminal-header">
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                            <div className="terminal-dots">
+                              <span className="terminal-dot red" />
+                              <span className="terminal-dot yellow" />
+                              <span className="terminal-dot green" />
+                            </div>
+                            <span className="terminal-title">
+                              {script.platform} — {script.action}
+                            </span>
+                          </div>
+
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            onClick={() => copyToClipboard(script.commands.join('\n'), `${script.platform} commands`)}
+                          >
+                            Copy Commands
+                          </button>
+                        </div>
+
+                        <div className="terminal-body">
+                          {script.commands.map((cmd, i) => (
+                            <div key={i} className={cmd.startsWith('#') ? 'terminal-comment' : ''}>
+                              {cmd}
+                            </div>
+                          ))}
+                        </div>
+
+                        {script.rollback_commands && script.rollback_commands.length > 0 && (
+                          <div>
+                            <button
+                              type="button"
+                              className="rollback-toggle-btn"
+                              onClick={() => toggleRollback(idx)}
+                            >
+                              <span>{expandedRollback[idx] ? '▼ Hide Rollback' : '▶ Show Rollback Commands'}</span>
+                            </button>
+                            {expandedRollback[idx] && (
+                              <div className="terminal-body" style={{ borderTop: '1px solid rgba(255,255,255,0.08)', background: 'rgba(0,0,0,0.7)' }}>
+                                <div className="terminal-comment"># Rollback Commands (if benign false positive):</div>
+                                {script.rollback_commands.map((cmd, i) => (
+                                  <div key={i}>{cmd}</div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {script.safe_mode_note && (
+                          <div className="safe-mode-callout">
+                            ⚠️ {script.safe_mode_note}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* 6. Regulatory & Security Compliance Controls */}
+                {assessment.compliance_mappings && assessment.compliance_mappings.length > 0 && (
+                  <div className="report-section">
+                    <h3 className="section-heading">
+                      <span>🏛️ Regulatory Compliance & Audit Controls</span>
+                    </h3>
+                    <div className="compliance-cards-grid">
+                      {assessment.compliance_mappings.map((comp, idx) => (
+                        <div key={idx} className="compliance-box">
+                          <div className="compliance-box-top">
+                            <span className="compliance-framework-pill">{comp.framework}</span>
+                            <span className="compliance-control-id">{comp.control_id}</span>
+                          </div>
+                          <div className="compliance-title">{comp.title}</div>
+                          <div className="compliance-desc">{comp.description}</div>
+                          <div className="compliance-relevance">
+                            <strong>Audit Relevance:</strong> {comp.relevance_note}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 7. Actionable Containment Steps */}
                 <div className="report-section">
                   <h3 className="section-heading">
                     Actionable Containment Steps ({Object.values(checkedSteps).filter(Boolean).length}/{assessment.recommended_steps.length})
@@ -514,7 +919,7 @@ ${assessment.uncertainty_limitations}
                   </ul>
                 </div>
 
-                {/* Supporting Observable Evidence */}
+                {/* 8. Supporting Observable Evidence */}
                 <div className="report-section">
                   <h3 className="section-heading">Observable Telemetry Evidence</h3>
                   <ul className="evidence-list">
@@ -526,7 +931,7 @@ ${assessment.uncertainty_limitations}
                   </ul>
                 </div>
 
-                {/* Cited Defensive Playbooks (RAG) */}
+                {/* 9. Cited Defensive Playbooks (RAG Grounding) */}
                 <div className="report-section">
                   <h3 className="section-heading">
                     Retrieved Defensive Playbooks (RAG Grounding)
@@ -554,7 +959,7 @@ ${assessment.uncertainty_limitations}
                   )}
                 </div>
 
-                {/* Operational Limitations */}
+                {/* 10. Operational Limitations */}
                 {assessment.uncertainty_limitations && (
                   <div className="report-section">
                     <h3 className="section-heading">Operational Uncertainty & Limitations</h3>
