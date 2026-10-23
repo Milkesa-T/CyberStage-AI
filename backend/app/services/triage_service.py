@@ -2,12 +2,14 @@
 CyberSage AI — Defensive Incident Triage Service
 
 Orchestrates the end-to-end incident triage lifecycle:
-1. Retrieval: Queries ChromaDB vector store for relevant defensive playbooks.
-2. Prompt Formulation: Synthesizes alert metadata, bounded logs, and playbook context with guardrails.
-3. LLM Inference: Invokes Google Gemini 2.5 Flash with structured output and low temperature.
-4. Fallback Handling: In offline or unauthenticated environments (missing GEMINI_API_KEY),
+1. Detector Registry: Runs all modular threat detectors & IOC extraction against raw telemetry.
+2. Retrieval: Queries ChromaDB vector store for relevant defensive playbooks.
+3. Prompt Formulation: Synthesizes alert metadata, bounded logs, and playbook context with guardrails.
+4. LLM Inference: Invokes Google Gemini 2.5 Flash with structured output and low temperature.
+5. Fallback Handling: In offline or unauthenticated environments (missing GEMINI_API_KEY),
    engages a defensive heuristic rule engine so tests, pipelines, and local dev function deterministically.
-5. Response Assembly: Validates and serializes into IncidentTriageResponse with playbook citations.
+6. Response Assembly: Validates and serializes into IncidentTriageResponse enriched with forensic
+   IOCs, MITRE ATT&CK mappings, and composite confidence scores.
 """
 
 import json
@@ -22,12 +24,16 @@ from google.genai import types
 
 from app.config import settings
 from app.core.prompts import TRIAGE_SYSTEM_INSTRUCTION, build_triage_prompt
+from app.detectors.registry import AggregatedDetectionContext, DetectorRegistry
 from app.rag.store import get_store
 from app.schemas.incident import (
+    ExtractedIOCs,
+    FalsePositiveRisk,
     IncidentCategory,
     IncidentSeverity,
     IncidentTriageRequest,
     IncidentTriageResponse,
+    MitreMapping,
     SourceReference,
 )
 
@@ -36,13 +42,21 @@ logger = logging.getLogger("cybersage.services.triage")
 
 class TriageService:
     """
-    Defensive incident triage orchestrator combining RAG retrieval and Gemini intelligence.
+    Defensive incident triage orchestrator combining modular detection, RAG retrieval,
+    and Gemini intelligence.
+
+    Phase 1 Enhancement: All triage responses are now enriched with:
+    - Forensic IOCs extracted from raw telemetry (IPs, domains, hashes, CVEs, cloud keys)
+    - MITRE ATT&CK tactic/technique attribution
+    - Composite confidence score from the detector ensemble
+    - False positive risk rating
     """
 
     def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None):
         self.api_key = api_key if api_key is not None else settings.GEMINI_API_KEY
         self.model_name = model_name or settings.GEMINI_MODEL
         self._gemini_client: Optional[genai.Client] = None
+        self._detector_registry = DetectorRegistry()
 
         if self.api_key and self.api_key.strip() and self.api_key != "your_gemini_api_key_here":
             try:
@@ -109,14 +123,33 @@ class TriageService:
         self,
         request: IncidentTriageRequest,
         retrieved_playbooks: list[dict],
+        detection_ctx: AggregatedDetectionContext,
     ) -> dict:
         """
-        Deterministic, rule-based triage assessment used when Gemini API key is not configured.
-        Ensures local development, CI/CD pipelines, and academic demonstrations run reliably.
-        """
-        combined_text = f"{request.title} {request.description} {request.raw_logs}".lower()
+        Deterministic, rule-based triage assessment.
 
-        # Category and Severity heuristics
+        Phase 1 upgrade: Now uses the primary DetectionResult from the registry as its
+        source of truth, with richer evidence lists and recommended steps.
+        Falls back to basic keyword heuristics only if no detector matched.
+        """
+        primary = detection_ctx.primary_result
+
+        if primary.detected and primary.confidence > 0.3:
+            # Use detector-produced assessment
+            return {
+                "suggested_severity": primary.severity,
+                "incident_category": primary.category,
+                "summary": primary.summary or f"Threat detected: {primary.category.value.replace('_', ' ').title()}",
+                "supporting_evidence": primary.evidence,
+                "uncertainty_limitations": (
+                    "Triage generated via modular heuristic detector engine. "
+                    "Provide a valid GEMINI_API_KEY to activate full Gemini 2.5 Flash neural reasoning."
+                ),
+                "recommended_steps": primary.recommended_steps,
+            }
+
+        # Legacy keyword fallback (no detector matched)
+        combined_text = f"{request.title} {request.description} {request.raw_logs}".lower()
         if any(w in combined_text for w in ["ssh", "failed password", "brute", "hydra", "stuffing"]):
             category = IncidentCategory.BRUTE_FORCE
             severity = IncidentSeverity.HIGH if "accepted password" in combined_text else IncidentSeverity.MEDIUM
@@ -125,7 +158,7 @@ class TriageService:
                 f"originating from {request.source_ip or 'external IP'}."
             )
             evidence = [
-                f"High-frequency authentication anomalies identified in submitted telemetry.",
+                "High-frequency authentication anomalies identified in submitted telemetry.",
                 f"Source address {request.source_ip or 'unknown'} repeatedly initiated login sequences.",
                 f"Target system: {request.affected_asset or 'unspecified host'}.",
             ]
@@ -161,7 +194,7 @@ class TriageService:
                 "Inspect persistence locations (cron, scheduled tasks, registry run keys) and terminate rogue processes.",
             ]
         elif any(w in combined_text for w in ["iam", "aws", "access_key", "secret_key", "bucket", "exfiltration"]):
-            category = IncidentCategory.UNAUTHORIZED_ACCESS
+            category = IncidentCategory.CLOUD_INFRASTRUCTURE
             severity = IncidentSeverity.CRITICAL
             summary = f"Potential credential leak or unauthorized cloud identity activity: {request.title}."
             evidence = [
@@ -201,14 +234,24 @@ class TriageService:
 
     def triage(self, request: IncidentTriageRequest) -> IncidentTriageResponse:
         """
-        Executes end-to-end triage: retrieval -> prompt -> LLM/heuristic -> response validation.
+        Executes end-to-end triage: detectors → retrieval → prompt → LLM/heuristic → response validation.
+
+        Phase 1: DetectorRegistry now runs FIRST providing IOCs, MITRE mapping, and confidence scores
+        that enrich the final response regardless of whether Gemini or heuristics are used.
         """
         logger.info(f"Initiating triage for incident: '{request.title}'")
 
-        # 1. RAG Retrieval
+        # 1. Run Modular Detector Registry (Phase 1 enrichment)
+        detection_ctx = self._detector_registry.evaluate(request)
+        logger.info(
+            f"Detection complete — primary: {detection_ctx.primary_result.category.value}, "
+            f"confidence: {detection_ctx.primary_result.confidence:.2f}, "
+            f"IOC count: {detection_ctx.iocs.ioc_count}"
+        )
+
+        # 2. RAG Retrieval
         retrieved_raw = self._retrieve_playbooks(request, top_k=3)
         source_refs: list[SourceReference] = []
-
         for item in retrieved_raw:
             source_refs.append(
                 SourceReference(
@@ -220,7 +263,7 @@ class TriageService:
                 )
             )
 
-        # 2. Decision Engine (Gemini LLM or Heuristic Fallback)
+        # 3. Decision Engine (Gemini LLM or Heuristic Fallback)
         raw_assessment: dict
         if self._gemini_client:
             try:
@@ -236,22 +279,41 @@ class TriageService:
                 logger.info("Successfully received structured assessment from Gemini model.")
             except Exception as e:
                 logger.error(f"Gemini API invocation failed ({e}). Falling back to heuristic assessment.")
-                raw_assessment = self._heuristic_triage(request, retrieved_raw)
+                raw_assessment = self._heuristic_triage(request, retrieved_raw, detection_ctx)
         else:
-            raw_assessment = self._heuristic_triage(request, retrieved_raw)
+            raw_assessment = self._heuristic_triage(request, retrieved_raw, detection_ctx)
 
-        # 3. Assemble and Validate Final Schema
+        # 4. Assemble and Validate Final Schema
         severity_val = raw_assessment.get("suggested_severity", "MEDIUM")
-        try:
-            severity = IncidentSeverity(severity_val.upper())
-        except ValueError:
-            severity = IncidentSeverity.MEDIUM
+        if isinstance(severity_val, IncidentSeverity):
+            severity = severity_val
+        else:
+            try:
+                severity = IncidentSeverity(str(severity_val).upper())
+            except ValueError:
+                severity = IncidentSeverity.MEDIUM
 
         category_val = raw_assessment.get("incident_category", "OTHER")
+        if isinstance(category_val, IncidentCategory):
+            category = category_val
+        else:
+            try:
+                category = IncidentCategory(str(category_val).upper())
+            except ValueError:
+                category = IncidentCategory.OTHER
+
+        # 5. Build enriched MITRE mapping (aggregate from all triggered detectors)
+        mitre = MitreMapping(
+            tactics=detection_ctx.aggregated_mitre_tactics or detection_ctx.primary_result.mitre_mapping.tactics,
+            techniques=detection_ctx.aggregated_mitre_techniques or detection_ctx.primary_result.mitre_mapping.techniques,
+        )
+
+        # 6. Resolve false positive risk
+        fp_risk_str = detection_ctx.primary_result.false_positive_risk
         try:
-            category = IncidentCategory(category_val.upper())
-        except ValueError:
-            category = IncidentCategory.OTHER
+            fp_risk = FalsePositiveRisk(fp_risk_str.upper())
+        except (ValueError, AttributeError):
+            fp_risk = FalsePositiveRisk.MEDIUM
 
         return IncidentTriageResponse(
             incident_id=str(uuid.uuid4()),
@@ -265,6 +327,11 @@ class TriageService:
             ),
             recommended_steps=raw_assessment.get("recommended_steps", []),
             source_references=source_refs,
+            # Phase 1 enrichment fields
+            extracted_iocs=detection_ctx.iocs,
+            mitre_mapping=mitre,
+            confidence_score=round(detection_ctx.primary_result.confidence, 3),
+            false_positive_risk=fp_risk,
         )
 
 
