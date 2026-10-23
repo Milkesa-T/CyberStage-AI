@@ -8,8 +8,11 @@ Orchestrates the end-to-end incident triage lifecycle:
 4. LLM Inference: Invokes Google Gemini 2.5 Flash with structured output and low temperature.
 5. Fallback Handling: In offline or unauthenticated environments (missing GEMINI_API_KEY),
    engages a defensive heuristic rule engine so tests, pipelines, and local dev function deterministically.
-6. Response Assembly: Validates and serializes into IncidentTriageResponse enriched with forensic
-   IOCs, MITRE ATT&CK mappings, and composite confidence scores.
+6. Enterprise Enrichment:
+   - Phase 1: IOC Extraction & Defanging, MITRE ATT&CK Attribution, Confidence Score, False Positive Risk.
+   - Phase 2: Regulatory Compliance Controls (NIST, ISO 27001, SOC 2, PCI-DSS, HIPAA, GDPR),
+     Enterprise SOC Response SLAs (MTTA / MTTR), and Executable Remediation Shell Scripts.
+7. Response Assembly: Validates and serializes into complete IncidentTriageResponse.
 """
 
 import json
@@ -22,11 +25,15 @@ from typing import Optional
 from google import genai
 from google.genai import types
 
+from app.compliance.mapper import ComplianceMapper
+from app.compliance.sla import SLACalculator
 from app.config import settings
 from app.core.prompts import TRIAGE_SYSTEM_INSTRUCTION, build_triage_prompt
 from app.detectors.registry import AggregatedDetectionContext, DetectorRegistry
 from app.rag.store import get_store
+from app.remediation.generator import RemediationGenerator
 from app.schemas.incident import (
+    ComplianceRequirement,
     ExtractedIOCs,
     FalsePositiveRisk,
     IncidentCategory,
@@ -34,6 +41,8 @@ from app.schemas.incident import (
     IncidentTriageRequest,
     IncidentTriageResponse,
     MitreMapping,
+    RemediationScript,
+    SLADeadline,
     SourceReference,
 )
 
@@ -43,13 +52,7 @@ logger = logging.getLogger("cybersage.services.triage")
 class TriageService:
     """
     Defensive incident triage orchestrator combining modular detection, RAG retrieval,
-    and Gemini intelligence.
-
-    Phase 1 Enhancement: All triage responses are now enriched with:
-    - Forensic IOCs extracted from raw telemetry (IPs, domains, hashes, CVEs, cloud keys)
-    - MITRE ATT&CK tactic/technique attribution
-    - Composite confidence score from the detector ensemble
-    - False positive risk rating
+    regulatory compliance mapping, SOC SLA deadlines, and Gemini intelligence.
     """
 
     def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None):
@@ -57,6 +60,9 @@ class TriageService:
         self.model_name = model_name or settings.GEMINI_MODEL
         self._gemini_client: Optional[genai.Client] = None
         self._detector_registry = DetectorRegistry()
+        self._compliance_mapper = ComplianceMapper()
+        self._sla_calculator = SLACalculator()
+        self._remediation_generator = RemediationGenerator()
 
         if self.api_key and self.api_key.strip() and self.api_key != "your_gemini_api_key_here":
             try:
@@ -127,15 +133,11 @@ class TriageService:
     ) -> dict:
         """
         Deterministic, rule-based triage assessment.
-
-        Phase 1 upgrade: Now uses the primary DetectionResult from the registry as its
-        source of truth, with richer evidence lists and recommended steps.
-        Falls back to basic keyword heuristics only if no detector matched.
+        Uses primary DetectionResult from the registry when a detector triggers.
         """
         primary = detection_ctx.primary_result
 
         if primary.detected and primary.confidence > 0.3:
-            # Use detector-produced assessment
             return {
                 "suggested_severity": primary.severity,
                 "incident_category": primary.category,
@@ -234,14 +236,13 @@ class TriageService:
 
     def triage(self, request: IncidentTriageRequest) -> IncidentTriageResponse:
         """
-        Executes end-to-end triage: detectors → retrieval → prompt → LLM/heuristic → response validation.
-
-        Phase 1: DetectorRegistry now runs FIRST providing IOCs, MITRE mapping, and confidence scores
-        that enrich the final response regardless of whether Gemini or heuristics are used.
+        Executes end-to-end enterprise incident triage:
+        detectors → RAG → LLM/heuristic → compliance mapping → SLA calculation → remediation generation.
         """
-        logger.info(f"Initiating triage for incident: '{request.title}'")
+        logger.info(f"Initiating enterprise triage for incident: '{request.title}'")
+        now_utc = datetime.now(timezone.utc)
 
-        # 1. Run Modular Detector Registry (Phase 1 enrichment)
+        # 1. Run Modular Detector Registry (Phase 1)
         detection_ctx = self._detector_registry.evaluate(request)
         logger.info(
             f"Detection complete — primary: {detection_ctx.primary_result.category.value}, "
@@ -283,7 +284,7 @@ class TriageService:
         else:
             raw_assessment = self._heuristic_triage(request, retrieved_raw, detection_ctx)
 
-        # 4. Assemble and Validate Final Schema
+        # 4. Resolve Severity and Category
         severity_val = raw_assessment.get("suggested_severity", "MEDIUM")
         if isinstance(severity_val, IncidentSeverity):
             severity = severity_val
@@ -302,22 +303,47 @@ class TriageService:
             except ValueError:
                 category = IncidentCategory.OTHER
 
-        # 5. Build enriched MITRE mapping (aggregate from all triggered detectors)
+        # 5. MITRE Mapping & False Positive Risk (Phase 1)
         mitre = MitreMapping(
             tactics=detection_ctx.aggregated_mitre_tactics or detection_ctx.primary_result.mitre_mapping.tactics,
             techniques=detection_ctx.aggregated_mitre_techniques or detection_ctx.primary_result.mitre_mapping.techniques,
         )
 
-        # 6. Resolve false positive risk
         fp_risk_str = detection_ctx.primary_result.false_positive_risk
         try:
             fp_risk = FalsePositiveRisk(fp_risk_str.upper())
         except (ValueError, AttributeError):
             fp_risk = FalsePositiveRisk.MEDIUM
 
+        # 6. Compliance Mapping, SLA Calculation & Remediation Scripts (Phase 2)
+        compliance_reqs = self._compliance_mapper.map_compliance(
+            category=category,
+            severity=severity,
+            iocs=detection_ctx.iocs,
+        )
+
+        sla_deadline = self._sla_calculator.calculate(
+            severity=severity,
+            category=category,
+            incident_time=now_utc,
+        )
+
+        remediation_scripts = self._remediation_generator.generate(
+            category=category,
+            severity=severity,
+            iocs=detection_ctx.iocs,
+            affected_asset=request.affected_asset,
+        )
+
+        logger.info(
+            f"Enterprise enrichment complete — {len(compliance_reqs)} compliance controls, "
+            f"MTTA={sla_deadline.mtta_minutes}m, "
+            f"{len(remediation_scripts)} remediation scripts generated."
+        )
+
         return IncidentTriageResponse(
             incident_id=str(uuid.uuid4()),
-            timestamp=datetime.now(timezone.utc),
+            timestamp=now_utc,
             suggested_severity=severity,
             incident_category=category,
             summary=raw_assessment.get("summary", f"Triage assessment for {request.title}"),
@@ -327,11 +353,15 @@ class TriageService:
             ),
             recommended_steps=raw_assessment.get("recommended_steps", []),
             source_references=source_refs,
-            # Phase 1 enrichment fields
+            # Phase 1 enrichment
             extracted_iocs=detection_ctx.iocs,
             mitre_mapping=mitre,
             confidence_score=round(detection_ctx.primary_result.confidence, 3),
             false_positive_risk=fp_risk,
+            # Phase 2 enrichment
+            compliance_mappings=compliance_reqs,
+            sla_deadline=sla_deadline,
+            remediation_scripts=remediation_scripts,
         )
 
 
