@@ -1,6 +1,7 @@
 import pytest
 import os
 import tempfile
+from app.config import settings
 from app.rag.parser import parse_all_playbooks, parse_playbook_file, PlaybookChunk
 
 
@@ -79,3 +80,26 @@ def test_parse_all_playbooks_handles_missing_directory():
     """Parser should return an empty list (not raise) for missing directory."""
     chunks = parse_all_playbooks("/nonexistent/path/playbooks")
     assert chunks == [], "Should return empty list for missing directory"
+
+
+def test_production_knowledge_base_contains_all_eight_playbooks():
+    """Validates that all 8 production playbooks exist and parse with minimum 5 chunks each."""
+    resolved_dir = settings.resolved_playbooks_dir
+    assert os.path.exists(resolved_dir), f"Playbooks dir not found at {resolved_dir}"
+
+    chunks = parse_all_playbooks(resolved_dir)
+    playbook_ids = {c.playbook_id for c in chunks}
+
+    expected_ids = {
+        "PB-001-SSH-BRUTE",
+        "PB-002-PHISHING",
+        "PB-003-MALWARE-PERSISTENCE",
+        "PB-004-CLOUD-IAM-LEAK",
+        "PB-005-RANSOMWARE",
+        "PB-006-CLOUD-IAM",
+        "PB-007-WEB-APP-ATTACK",
+        "PB-008-ACTIVE-DIRECTORY",
+    }
+
+    assert expected_ids.issubset(playbook_ids), f"Missing playbooks: {expected_ids - playbook_ids}"
+    assert len(chunks) >= 40, f"Expected at least 40 chunks across 8 playbooks, got {len(chunks)}"
