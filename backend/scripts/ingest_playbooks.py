@@ -33,8 +33,8 @@ logger = logging.getLogger("ingest")
 
 
 def main():
-    playbooks_dir = os.path.abspath(settings.PLAYBOOKS_DIRECTORY)
-    persist_dir = os.path.abspath(settings.CHROMA_PERSIST_DIRECTORY)
+    playbooks_dir = settings.resolved_playbooks_dir
+    persist_dir = settings.resolved_chroma_dir
 
     logger.info(f"Playbooks directory : {playbooks_dir}")
     logger.info(f"ChromaDB persist dir: {persist_dir}")

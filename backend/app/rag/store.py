@@ -23,7 +23,7 @@ from app.rag.parser import PlaybookChunk
 
 logger = logging.getLogger("cybersage.rag.store")
 
-COLLECTION_NAME = "cybersage_playbooks"
+COLLECTION_NAME = "cybersage_playbooks_v2"
 
 
 class PlaybookVectorStore:
