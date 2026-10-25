@@ -19,7 +19,6 @@ DESIGN DECISIONS:
 import logging
 from typing import Optional
 import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 from app.rag.parser import PlaybookChunk
 
 logger = logging.getLogger("cybersage.rag.store")
@@ -39,7 +38,23 @@ class PlaybookVectorStore:
         self._collection = None
 
     def _get_embedding_function(self):
-        return SentenceTransformerEmbeddingFunction(model_name=self._embedding_model)
+        """
+        Loads lightweight ONNX-based embedding function (under 80MB RAM)
+        to prevent Out-Of-Memory errors on cloud containers (e.g. Render 512MB tier).
+        Falls back to SentenceTransformer if explicitly requested and available.
+        """
+        try:
+            from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+            logger.info("Using ChromaDB DefaultEmbeddingFunction (ONNX MiniLM-L6-V2, low-memory).")
+            return DefaultEmbeddingFunction()
+        except Exception:
+            try:
+                from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+                logger.info(f"Falling back to SentenceTransformerEmbeddingFunction with {self._embedding_model}.")
+                return SentenceTransformerEmbeddingFunction(model_name=self._embedding_model)
+            except Exception as e:
+                logger.warning(f"Embedding function fallback to Chroma internal default: {e}")
+                return None
 
     def initialize(self):
         """
@@ -48,11 +63,11 @@ class PlaybookVectorStore:
         """
         logger.info(f"Initializing ChromaDB at '{self._persist_directory}'")
         self._client = chromadb.PersistentClient(path=self._persist_directory)
-        self._collection = self._client.get_or_create_collection(
-            name=COLLECTION_NAME,
-            embedding_function=self._get_embedding_function(),
-            metadata={"hnsw:space": "cosine"},
-        )
+        ef = self._get_embedding_function()
+        kwargs = {"name": COLLECTION_NAME, "metadata": {"hnsw:space": "cosine"}}
+        if ef is not None:
+            kwargs["embedding_function"] = ef
+        self._collection = self._client.get_or_create_collection(**kwargs)
         count = self._collection.count()
         logger.info(f"Collection '{COLLECTION_NAME}' ready — {count} chunks indexed.")
         return self

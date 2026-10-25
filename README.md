@@ -185,8 +185,10 @@ docker compose up --build
 
 ---
 
-## Academic Documentation & Defense Resources
+## Documentation & Deployment Resources
 
+- [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) — Production deployment runbook for Render, Vercel, and Docker Compose.
+- [docs/DISCORD_SHOWCASE.md](docs/DISCORD_SHOWCASE.md) — Ready-to-use Discord announcements, project summaries, and community showcase templates.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Technical deep-dive on design patterns, vector search, and threat model.
 - [docs/ACADEMIC_DEFENSE_GUIDE.md](docs/ACADEMIC_DEFENSE_GUIDE.md) — Comprehensive guide with 20 likely questions from professors/evaluators and answers.
 - [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) — Script for project submission video or live presentation.
